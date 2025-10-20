@@ -302,5 +302,7 @@ def update_profile():
 
     return redirect(url_for('account'))
 
-if __name__ == '__main__':
-    app.run(debug=True)
+
+if __name__ == "__main__":
+    import os
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))

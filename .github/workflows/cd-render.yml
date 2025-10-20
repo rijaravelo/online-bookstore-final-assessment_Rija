@@ -11,17 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Optional: only deploy if CI workflow succeeded
-      # - name: Ensure CI passed on this commit
-      #   uses: re-actors/alls-green@release/v1
-      #   with:
-      #     allowed-empty: true
-      #     jobs: "CI"
-
-      - name: Trigger Render deploy
+      - name: Trigger Render deploy via hook
         run: |
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{"clearCache": false}' \
-            https://api.render.com/v1/services/srv-d3qv60t6ubrc7389bm90/deploys
+          # Hook returns 204 No Content on success
+          code=$(curl -sS -o /dev/null -w "%{http_code}" "${{ secrets.RENDER_DEPLOY_HOOK_URL }}")
+          echo "HTTP $code"
+          test "$code" = "204"
+

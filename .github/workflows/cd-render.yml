@@ -1,0 +1,27 @@
+name: CD • Render
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Optional: only deploy if CI workflow succeeded
+      # - name: Ensure CI passed on this commit
+      #   uses: re-actors/alls-green@release/v1
+      #   with:
+      #     allowed-empty: true
+      #     jobs: "CI"
+
+      - name: Trigger Render deploy
+        run: |
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache": false}' \
+            https://api.render.com/v1/services/srv-d3qv60t6ubrc7389bm90/deploys

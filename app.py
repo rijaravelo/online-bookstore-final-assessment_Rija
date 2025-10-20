@@ -1,122 +1,109 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session
-from models import Book, Cart, User, Order, PaymentGateway, EmailService
+from models import (
+    Book, Cart, User, Order, PaymentGateway, EmailService,
+    is_valid_email, sanitize_text  # new helpers
+)
 import uuid
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key'  # Required for session management
+app.secret_key = 'your_secret_key'  # In production, load from env
 
-# Global storage for users and orders (in production, use a database)
-users = {}  # email -> User object
-orders = {}  # order_id -> Order object
+# Global storage for users and orders (demo only; use DB in prod)
+# Store users by LOWERCASED email to prevent duplicate-case issues
+users = {}   # email(lower) -> User
+orders = {}  # order_id -> Order
 
-# Create demo user for testing
+# Demo user
 demo_user = User("demo@bookstore.com", "demo123", "Demo User", "123 Demo Street, Demo City, DC 12345")
-users["demo@bookstore.com"] = demo_user
+users[demo_user.email.lower()] = demo_user
 
-# Create a cart instance to manage the cart
+# Single Cart instance (demo)
 cart = Cart()
 
-# Create a global books list to avoid duplication
+# Catalog
 BOOKS = [
     Book("The Great Gatsby", "Fiction", 10.99, "/images/books/the_great_gatsby.jpg"),
     Book("1984", "Dystopia", 8.99, "/images/books/1984.jpg"),
     Book("I Ching", "Traditional", 18.99, "/images/books/I-Ching.jpg"),
-    Book("Moby Dick", "Adventure", 12.49, "/images/books/moby_dick.jpg")
+    Book("Moby Dick", "Adventure", 12.49, "/images/books/moby_dick.jpg"),
 ]
 
-def get_book_by_title(title):
-    """Helper function to find a book by title"""
-    return next((book for book in BOOKS if book.title == title), None)
-
+def get_book_by_title(title: str):
+    title = (title or "").strip()
+    return next((b for b in BOOKS if b.title == title), None)
 
 def get_current_user():
-    """Helper function to get current logged-in user"""
     if 'user_email' in session:
-        return users.get(session['user_email'])
+        return users.get(session['user_email'].lower())
     return None
 
-
 def login_required(f):
-    """Decorator to require login for certain routes"""
     from functools import wraps
     @wraps(f)
-    def decorated_function(*args, **kwargs):
+    def wrapper(*args, **kwargs):
         if 'user_email' not in session:
             flash('Please log in to access this page.', 'error')
             return redirect(url_for('login'))
         return f(*args, **kwargs)
-    return decorated_function
-
+    return wrapper
 
 @app.route('/')
 def index():
-    current_user = get_current_user()
-    return render_template('index.html', books=BOOKS, cart=cart, current_user=current_user)
-
+    return render_template('index.html', books=BOOKS, cart=cart, current_user=get_current_user())
 
 @app.route('/add-to-cart', methods=['POST'])
 def add_to_cart():
-    book_title = request.form.get('title')
-    quantity = int(request.form.get('quantity', 1))
-    
-    book = None
-    for b in BOOKS:
-        if b.title == book_title:
-            book = b
-            break
-    
-    if book:
-        cart.add_book(book, quantity)
-        flash(f'Added {quantity} "{book.title}" to cart!', 'success')
-    else:
+    title = sanitize_text(request.form.get('title'))
+    raw_qty = request.form.get('quantity', '1')
+
+    # Robust quantity parsing & validation
+    try:
+        quantity = int(raw_qty)
+    except ValueError:
+        quantity = 1
+    if quantity < 1:
+        flash('Quantity must be at least 1.', 'error')
+        return redirect(url_for('index'))
+    if quantity > 999:
+        quantity = 999  # simple upper bound to avoid abuse
+
+    book = get_book_by_title(title)
+    if not book:
         flash('Book not found!', 'error')
+        return redirect(url_for('index'))
 
+    cart.add_book(book, quantity)
+    flash(f'Added {quantity} "{book.title}" to cart!', 'success')
     return redirect(url_for('index'))
-
 
 @app.route('/remove-from-cart', methods=['POST'])
 def remove_from_cart():
-    book_title = request.form.get('title')
-    cart.remove_book(book_title)
-    flash(f'Removed "{book_title}" from cart!', 'success')
+    title = sanitize_text(request.form.get('title'))
+    cart.remove_book(title)
+    flash(f'Removed "{title}" from cart!', 'success')
     return redirect(url_for('view_cart'))
-
 
 @app.route('/update-cart', methods=['POST'])
 def update_cart():
-    """
-    Update the quantity of a book in the cart.
-    This function handles HTTP POST requests to update the quantity of a book in the user's cart.
-    If the quantity is set to 0 or less, the book is effectively removed from the cart.
-    Args:
-        None (uses form data from the request)
-    Returns:
-        Response: Redirects to the view_cart page after updating the cart.
-    Form Parameters:
-        title (str): The title of the book to update.
-        quantity (int): The new quantity of the book. Defaults to 1.
-    Flash Messages:
-        - Confirmation of removal if quantity <= 0
-        - Confirmation of update otherwise
-    """
-    book_title = request.form.get('title')
-    quantity = int(request.form.get('quantity', 1))
-    
-    cart.update_quantity(book_title, quantity)
-    
-    if quantity <= 0:
-        flash(f'Removed "{book_title}" from cart!', 'success')
-    else:
-        flash(f'Updated "{book_title}" quantity to {quantity}!', 'success')
-    
-    return redirect(url_for('view_cart'))
+    title = sanitize_text(request.form.get('title'))
+    raw_qty = request.form.get('quantity', '1')
 
+    try:
+        quantity = int(raw_qty)
+    except ValueError:
+        quantity = 1
+
+    # If the quantity is <= 0, remove the item (fixes “zero not removed” bug)
+    cart.update_quantity(title, quantity)
+    if quantity <= 0:
+        flash(f'Removed "{title}" from cart!', 'success')
+    else:
+        flash(f'Updated "{title}" quantity to {quantity}!', 'success')
+    return redirect(url_for('view_cart'))
 
 @app.route('/cart')
 def view_cart():
-    current_user = get_current_user()
-    return render_template('cart.html', cart=cart, current_user=current_user)
-
+    return render_template('cart.html', cart=cart, current_user=get_current_user())
 
 @app.route('/clear-cart', methods=['POST'])
 def clear_cart():
@@ -124,76 +111,86 @@ def clear_cart():
     flash('Cart cleared!', 'success')
     return redirect(url_for('view_cart'))
 
-
 @app.route('/checkout')
 def checkout():
     if cart.is_empty():
         flash('Your cart is empty!', 'error')
         return redirect(url_for('index'))
-    
-    current_user = get_current_user()
-    total_price = cart.get_total_price()
-    return render_template('checkout.html', cart=cart, total_price=total_price, current_user=current_user)
-
+    return render_template('checkout.html', cart=cart, total_price=cart.get_total_price(), current_user=get_current_user())
 
 @app.route('/process-checkout', methods=['POST'])
 def process_checkout():
-    """Process the checkout form with shipping and payment information"""
     if cart.is_empty():
         flash('Your cart is empty!', 'error')
         return redirect(url_for('index'))
-    
-    # Get form data
+
+    # Shipping info
     shipping_info = {
-        'name': request.form.get('name'),
-        'email': request.form.get('email'),
-        'address': request.form.get('address'),
-        'city': request.form.get('city'),
-        'zip_code': request.form.get('zip_code')
+        'name': sanitize_text(request.form.get('name')),
+        'email': sanitize_text(request.form.get('email')),
+        'address': sanitize_text(request.form.get('address')),
+        'city': sanitize_text(request.form.get('city')),
+        'zip_code': sanitize_text(request.form.get('zip_code')),
     }
-    
+
+    # Required shipping fields + email format
+    required = ['name', 'email', 'address', 'city', 'zip_code']
+    for f in required:
+        if not shipping_info.get(f):
+            flash(f'Please fill in the {f.replace("_", " ")} field.', 'error')
+            return redirect(url_for('checkout'))
+    if not is_valid_email(shipping_info['email']):
+        flash('Please enter a valid email address.', 'error')
+        return redirect(url_for('checkout'))
+
+    # Payment info
+    payment_method = request.form.get('payment_method', '').strip().lower()
     payment_info = {
-        'payment_method': request.form.get('payment_method'),
-        'card_number': request.form.get('card_number'),
-        'expiry_date': request.form.get('expiry_date'),
-        'cvv': request.form.get('cvv')
+        'payment_method': payment_method,
+        'card_number': sanitize_text(request.form.get('card_number')),
+        'expiry_date': sanitize_text(request.form.get('expiry_date')),
+        'cvv': sanitize_text(request.form.get('cvv')),
+        'paypal_email': sanitize_text(request.form.get('paypal_email')),  # for PayPal validation
     }
-    
-    discount_code = request.form.get('discount_code', '')
-    
-    # Calculate total with discount
+
+    # Discounts: case-insensitive & trimmed (fix case-sensitive bug)
+    discount_code = (request.form.get('discount_code', '') or '').strip().upper()
     total_amount = cart.get_total_price()
-    discount_applied = 0
-    
-    if discount_code == 'SAVE10':
-        discount_applied = total_amount * 0.10
-        total_amount -= discount_applied
-        flash(f'Discount applied! You saved ${discount_applied:.2f}', 'success')
-    elif discount_code == 'WELCOME20':
-        discount_applied = total_amount * 0.20
-        total_amount -= discount_applied
-        flash(f'Welcome discount applied! You saved ${discount_applied:.2f}', 'success')
-    elif discount_code:
-        flash('Invalid discount code', 'error')
-    
-    required_fields = ['name', 'email', 'address', 'city', 'zip_code']
-    for field in required_fields:
-        if not shipping_info.get(field):
-            flash(f'Please fill in the {field.replace("_", " ")} field', 'error')
+    discount_applied = 0.0
+
+    DISCOUNTS = {
+        'SAVE10': 0.10,
+        'WELCOME20': 0.20,
+    }
+    if discount_code:
+        if discount_code in DISCOUNTS:
+            rate = DISCOUNTS[discount_code]
+            discount_applied = total_amount * rate
+            total_amount -= discount_applied
+            flash(f'Discount applied! You saved ${discount_applied:.2f}', 'success')
+        else:
+            # non-blocking error message
+            flash('Invalid discount code.', 'error')
+
+    # Validate required payment fields (fix missing PayPal validation)
+    if payment_method == 'credit_card':
+        if not (payment_info['card_number'] and payment_info['expiry_date'] and payment_info['cvv']):
+            flash('Please fill in all credit card details.', 'error')
             return redirect(url_for('checkout'))
-    
-    if payment_info['payment_method'] == 'credit_card':
-        if not payment_info.get('card_number') or not payment_info.get('expiry_date') or not payment_info.get('cvv'):
-            flash('Please fill in all credit card details', 'error')
+    elif payment_method == 'paypal':
+        if not payment_info['paypal_email'] or not is_valid_email(payment_info['paypal_email']):
+            flash('Please provide a valid PayPal email.', 'error')
             return redirect(url_for('checkout'))
-    
-    # Process payment through mock gateway
+    else:
+        flash('Please select a valid payment method.', 'error')
+        return redirect(url_for('checkout'))
+
+    # Process payment (mock)
     payment_result = PaymentGateway.process_payment(payment_info)
-    
     if not payment_result['success']:
         flash(payment_result['message'], 'error')
         return redirect(url_for('checkout'))
-    
+
     # Create order
     order_id = str(uuid.uuid4())[:8].upper()
     order = Order(
@@ -201,130 +198,109 @@ def process_checkout():
         user_email=shipping_info['email'],
         items=cart.get_items(),
         shipping_info=shipping_info,
-        payment_info={
-            'method': payment_info['payment_method'],
-            'transaction_id': payment_result['transaction_id']
-        },
+        payment_info={'method': payment_method, 'transaction_id': payment_result['transaction_id']},
         total_amount=total_amount
     )
-    
-    # Store order
     orders[order_id] = order
-    
-    # Add order to user if logged in
+
+    # Attach order to logged-in user
     current_user = get_current_user()
     if current_user:
         current_user.add_order(order)
-    
-    # Send confirmation email (mock)
+
+    # Confirmation email (mock)
     EmailService.send_order_confirmation(shipping_info['email'], order)
-    
-    # Clear cart
+
+    # Clear cart for next purchase
     cart.clear()
-    
-    # Store order in session for confirmation page
+
+    # Show confirmation
     session['last_order_id'] = order_id
-    
     flash('Payment successful! Your order has been confirmed.', 'success')
     return redirect(url_for('order_confirmation', order_id=order_id))
 
-
 @app.route('/order-confirmation/<order_id>')
 def order_confirmation(order_id):
-    """Display order confirmation page"""
     order = orders.get(order_id)
     if not order:
-        flash('Order not found', 'error')
+        flash('Order not found.', 'error')
         return redirect(url_for('index'))
-    
-    current_user = get_current_user()
-    return render_template('order_confirmation.html', order=order, current_user=current_user)
+    return render_template('order_confirmation.html', order=order, current_user=get_current_user())
 
-
-# User Account Management Routes
+# -------- User Account Management -------- #
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    """User registration"""
     if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        name = request.form.get('name')
-        address = request.form.get('address', '')
-        
-        # Validate required fields
+        email = sanitize_text(request.form.get('email'))
+        password = request.form.get('password') or ''
+        name = sanitize_text(request.form.get('name'))
+        address = sanitize_text(request.form.get('address', ''))
+
         if not email or not password or not name:
-            flash('Please fill in all required fields', 'error')
+            flash('Please fill in all required fields.', 'error')
             return render_template('register.html')
-        
-        if email in users:
-            flash('An account with this email already exists', 'error')
+
+        if not is_valid_email(email):
+            flash('Please enter a valid email address.', 'error')
             return render_template('register.html')
-        
-        # Create new user
+
+        key = email.lower()
+        if key in users:
+            flash('An account with this email already exists.', 'error')
+            return render_template('register.html')
+
+        # Create user with hashed password (fix plain-text storage)
         user = User(email, password, name, address)
-        users[email] = user
-        
-        # Log in the user
+        users[key] = user
+
         session['user_email'] = email
         flash('Account created successfully! You are now logged in.', 'success')
         return redirect(url_for('index'))
-    
-    return render_template('register.html')
 
+    return render_template('register.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """User login"""
     if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        
-        user = users.get(email)
-        if user and user.password == password:
-            session['user_email'] = email
+        email = sanitize_text(request.form.get('email'))
+        password = request.form.get('password') or ''
+        user = users.get((email or '').lower())
+
+        if user and user.check_password(password):
+            session['user_email'] = user.email  # original case preserved on object
             flash('Logged in successfully!', 'success')
             return redirect(url_for('index'))
-        else:
-            flash('Invalid email or password', 'error')
-    
-    return render_template('login.html')
 
+        flash('Invalid email or password.', 'error')
+    return render_template('login.html')
 
 @app.route('/logout')
 def logout():
-    """User logout"""
     session.pop('user_email', None)
     flash('Logged out successfully!', 'success')
     return redirect(url_for('index'))
 
-
 @app.route('/account')
 @login_required
 def account():
-    """User account page"""
-    current_user = get_current_user()
-    return render_template('account.html', current_user=current_user)
-
+    return render_template('account.html', current_user=get_current_user())
 
 @app.route('/update-profile', methods=['POST'])
 @login_required
 def update_profile():
-    """Update user profile"""
     current_user = get_current_user()
-    
-    current_user.name = request.form.get('name', current_user.name)
-    current_user.address = request.form.get('address', current_user.address)
-    
+    current_user.name = sanitize_text(request.form.get('name', current_user.name))
+    current_user.address = sanitize_text(request.form.get('address', current_user.address))
+
     new_password = request.form.get('new_password')
     if new_password:
-        current_user.password = new_password
+        current_user.set_password(new_password)
         flash('Password updated successfully!', 'success')
     else:
         flash('Profile updated successfully!', 'success')
-    
-    return redirect(url_for('account'))
 
+    return redirect(url_for('account'))
 
 if __name__ == '__main__':
     app.run(debug=True)
